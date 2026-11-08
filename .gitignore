@@ -1,0 +1,49 @@
+# dependencias
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# next.js
+.next/
+out/
+next-env.d.ts
+
+# build y cobertura
+build/
+dist/
+coverage/
+*.tsbuildinfo
+
+# variables de entorno (solo se versiona el ejemplo)
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# certificados
+*.pem
+
+# sistema operativo
+.DS_Store
+Thumbs.db
+
+# editores
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+
+# archivos generados por next dev
+AGENTS.md
