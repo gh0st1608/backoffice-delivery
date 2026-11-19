@@ -15,6 +15,8 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export type RequestOptions = {
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
+  // The end user's token; omit it for internal calls made by the BFF itself.
+  accessToken?: string;
 };
 
 const SERVICE_URL = {
@@ -42,12 +44,19 @@ export class ServiceHttpClient {
     options: RequestOptions = {},
   ): Promise<T> {
     const url = this.buildUrl(service, path, options.query);
+    const headers: Record<string, string> = {
+      'X-Internal-Api-Key': this.config.get('INTERNAL_API_KEY', {
+        infer: true,
+      }),
+    };
+    if (options.body !== undefined)
+      headers['Content-Type'] = 'application/json';
+    if (options.accessToken) {
+      headers.Authorization = `Bearer ${options.accessToken}`;
+    }
     const init: RequestInit = {
       method,
-      headers:
-        options.body === undefined
-          ? undefined
-          : { 'Content-Type': 'application/json' },
+      headers,
       body:
         options.body === undefined ? undefined : JSON.stringify(options.body),
     };
@@ -59,7 +68,13 @@ export class ServiceHttpClient {
         return this.unwrap<T>(result);
       }
       if (result instanceof Response && result.status < 500) {
-        throw await this.clientError(result);
+        // Without a user token a 401/403 means the BFF's own key was rejected, not the user.
+        const internalRejected =
+          !options.accessToken &&
+          (result.status === 401 || result.status === 403);
+        throw internalRejected
+          ? this.gatewayError(service, method, path, result)
+          : await this.clientError(result);
       }
       // 5xx, network error or timeout
       if (attempt < retryDelays.length) {
@@ -113,9 +128,11 @@ export class ServiceHttpClient {
     path: string,
     failure: Response | Error,
   ): HttpException {
+    const rejected =
+      failure instanceof Response && [401, 403].includes(failure.status);
     const reason =
       failure instanceof Response
-        ? `status ${failure.status}`
+        ? `status ${failure.status}${rejected ? ' (internal call rejected; check the BFF internal api key)' : ''}`
         : `${failure.name}: ${failure.message}`;
     this.logger.error(`${method} ${service} ${path} failed: ${reason}`);
 

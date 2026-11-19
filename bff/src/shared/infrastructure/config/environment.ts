@@ -4,6 +4,7 @@ export type Environment = {
   SHOP_SERVICE_URL: string;
   ORDER_SERVICE_URL: string;
   PAYMENT_SERVICE_URL: string;
+  INTERNAL_API_KEY: string;
 };
 
 function requiredUrl(config: Record<string, unknown>, name: string): string {
@@ -13,6 +14,15 @@ function requiredUrl(config: Record<string, unknown>, name: string): string {
   }
   if (!URL.canParse(value)) {
     throw new Error(`${name} is not a valid URL: ${value}`);
+  }
+  return value;
+}
+
+// Error messages name the variable but never include its value.
+function requiredSecret(config: Record<string, unknown>, name: string): string {
+  const value = config[name];
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`Missing required environment variable: ${name}`);
   }
   return value;
 }
@@ -31,5 +41,6 @@ export function validate(config: Record<string, unknown>): Environment {
     SHOP_SERVICE_URL: requiredUrl(config, 'SHOP_SERVICE_URL'),
     ORDER_SERVICE_URL: requiredUrl(config, 'ORDER_SERVICE_URL'),
     PAYMENT_SERVICE_URL: requiredUrl(config, 'PAYMENT_SERVICE_URL'),
+    INTERNAL_API_KEY: requiredSecret(config, 'INTERNAL_API_KEY'),
   };
 }
