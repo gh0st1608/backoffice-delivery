@@ -54,3 +54,13 @@ Dependency rules:
 - `presentation` uses `application` through `di/`.
 - `src/app` imports only from `modules/<context>/index.ts`.
 - A module must not import the internal layers of another module.
+
+### BFF (`bff/`)
+
+The NestJS BFF follows the same layers inside `bff/src/modules/<context>/`:
+
+- Controllers live in `presentation`.
+- Each Nest `*.module.ts` plays the role of `di/`: it wires use cases and controllers.
+- Use cases are plain classes registered with `useFactory`, so `application` still imports only `domain`.
+- `bff/src/app.module.ts` imports modules only through their `index.ts`.
+- Shared code goes in `bff/src/shared`.
