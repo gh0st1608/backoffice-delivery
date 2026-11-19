@@ -1,3 +1,7 @@
+packages:
+  - .
+  - bff
+
 allowBuilds:
   sharp: false
   unrs-resolver: false
