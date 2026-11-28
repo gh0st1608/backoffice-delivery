@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import { apiKeyConfig } from '../config/api-key.config';
 import { httpConfig } from '../config/http.config';
@@ -8,19 +8,18 @@ import { InternalCallRejectedException } from '../exceptions/internal-call-rejec
 import { ServiceRequestFailedException } from '../exceptions/service-request-failed.exception';
 import { ServiceTimeoutException } from '../exceptions/service-timeout.exception';
 import { ServiceUnavailableException } from '../exceptions/service-unavailable.exception';
-
-export type Service = 'auth' | 'shop' | 'order' | 'payment';
-export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-
-export type RequestOptions = {
-  query?: Record<string, string | number | boolean | undefined>;
-  body?: unknown;
-  // The end user's token; omit it for internal calls made by the BFF itself.
-  accessToken?: string;
-};
+import { parseErrorBody } from './parse-error-body';
+import type {
+  HttpMethod,
+  RequestOptions,
+  Service,
+  ServiceSuccessResponse,
+} from './service-http.types';
 
 @Injectable()
 export class ServiceHttpClient {
+  private readonly logger = new Logger(ServiceHttpClient.name);
+
   constructor(
     @Inject(servicesConfig.KEY)
     private readonly services: ConfigType<typeof servicesConfig>,
@@ -36,7 +35,7 @@ export class ServiceHttpClient {
     method: HttpMethod,
     path: string,
     options: RequestOptions = {},
-  ): Promise<T> {
+  ): Promise<T | undefined> {
     const url = this.buildUrl(service, path, options.query);
     const headers: Record<string, string> = {
       'X-Internal-Api-Key': this.apiKey.internalApiKey,
@@ -54,24 +53,24 @@ export class ServiceHttpClient {
     };
     // Only GET is retried so writes are never duplicated.
     const retryDelays = method === 'GET' ? this.http.retryDelaysMs : [];
+    // It gets logged, so it holds no headers and nothing from options.query or the body.
+    const call = `${method} ${service} ${path}`;
 
     for (let attempt = 0; ; attempt++) {
       const result = await this.send(url, init);
       if (result instanceof Response && result.ok) {
-        return this.unwrap<T>(result);
+        return this.unwrap<T>(result, service, call);
       }
-      // The filter logs this, so it holds no headers and nothing from options.query or the body.
-      const call = `${method} ${service} ${path} failed:`;
       if (result instanceof Response && result.status < 500) {
         if (!options.accessToken && [401, 403].includes(result.status)) {
           throw new InternalCallRejectedException(
             service,
-            `${call} status ${result.status}`,
+            `${call} failed: status ${result.status}`,
           );
         }
         throw new ServiceRequestFailedException(
           result.status,
-          await result.text(),
+          parseErrorBody(await result.text()),
         );
       }
       // 5xx, network error or timeout
@@ -82,10 +81,10 @@ export class ServiceHttpClient {
       if (result instanceof Response) {
         throw new ServiceUnavailableException(
           service,
-          `${call} status ${result.status}`,
+          `${call} failed: status ${result.status}`,
         );
       }
-      const cause = `${call} ${result.name}: ${result.message}`;
+      const cause = `${call} failed: ${result.name}: ${result.message}`;
       throw result.name === 'TimeoutError'
         ? new ServiceTimeoutException(service, cause)
         : new ServiceUnavailableException(service, cause);
@@ -120,19 +119,28 @@ export class ServiceHttpClient {
     return url.toString();
   }
 
-  // Backends answer { Data: ... }; empty or non-JSON bodies are returned as undefined / raw text.
-  private async unwrap<T>(response: Response): Promise<T> {
+  // An empty body is legitimate (204). A body without Data is not an error, but it is logged.
+  private async unwrap<T>(
+    response: Response,
+    service: Service,
+    call: string,
+  ): Promise<T | undefined> {
     const text = await response.text();
-    if (text === '') return undefined as T;
+    if (text === '') return undefined;
+    let body: ServiceSuccessResponse<T> | null;
     try {
-      const json: unknown = JSON.parse(text);
-      return (
-        json !== null && typeof json === 'object' && 'Data' in json
-          ? json.Data
-          : json
-      ) as T;
+      body = JSON.parse(text) as ServiceSuccessResponse<T> | null;
     } catch {
-      return text as T;
+      throw new ServiceUnavailableException(
+        service,
+        `${call} failed: status ${response.status} with a non-JSON body`,
+      );
     }
+    // A null Data counts as no data too; returning it would let null pass as a T.
+    if (body?.Data == null) {
+      this.logger.warn(`${call}: response without Data`);
+      return undefined;
+    }
+    return body.Data;
   }
 }
