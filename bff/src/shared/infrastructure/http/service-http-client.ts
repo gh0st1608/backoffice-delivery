@@ -1,16 +1,13 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import {
-  BadGatewayException,
-  GatewayTimeoutException,
-  HttpException,
-  Inject,
-  Injectable,
-  Logger,
-} from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import { apiKeyConfig } from '../config/api-key.config';
 import { httpConfig } from '../config/http.config';
 import { servicesConfig } from '../config/services.config';
+import { InternalCallRejectedException } from '../exceptions/internal-call-rejected.exception';
+import { ServiceRequestFailedException } from '../exceptions/service-request-failed.exception';
+import { ServiceTimeoutException } from '../exceptions/service-timeout.exception';
+import { ServiceUnavailableException } from '../exceptions/service-unavailable.exception';
 
 export type Service = 'auth' | 'shop' | 'order' | 'payment';
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -24,8 +21,6 @@ export type RequestOptions = {
 
 @Injectable()
 export class ServiceHttpClient {
-  private readonly logger = new Logger(ServiceHttpClient.name);
-
   constructor(
     @Inject(servicesConfig.KEY)
     private readonly services: ConfigType<typeof servicesConfig>,
@@ -65,21 +60,35 @@ export class ServiceHttpClient {
       if (result instanceof Response && result.ok) {
         return this.unwrap<T>(result);
       }
+      // The filter logs this, so it holds no headers and nothing from options.query or the body.
+      const call = `${method} ${service} ${path} failed:`;
       if (result instanceof Response && result.status < 500) {
-        // Without a user token a 401/403 means the BFF's own key was rejected, not the user.
-        const internalRejected =
-          !options.accessToken &&
-          (result.status === 401 || result.status === 403);
-        throw internalRejected
-          ? this.gatewayError(service, method, path, result)
-          : await this.clientError(result);
+        if (!options.accessToken && [401, 403].includes(result.status)) {
+          throw new InternalCallRejectedException(
+            service,
+            `${call} status ${result.status}`,
+          );
+        }
+        throw new ServiceRequestFailedException(
+          result.status,
+          await result.text(),
+        );
       }
       // 5xx, network error or timeout
       if (attempt < retryDelays.length) {
         await sleep(retryDelays[attempt]);
         continue;
       }
-      throw this.gatewayError(service, method, path, result);
+      if (result instanceof Response) {
+        throw new ServiceUnavailableException(
+          service,
+          `${call} status ${result.status}`,
+        );
+      }
+      const cause = `${call} ${result.name}: ${result.message}`;
+      throw result.name === 'TimeoutError'
+        ? new ServiceTimeoutException(service, cause)
+        : new ServiceUnavailableException(service, cause);
     }
   }
 
@@ -95,59 +104,6 @@ export class ServiceHttpClient {
     } catch (error) {
       return error instanceof Error ? error : new Error(String(error));
     }
-  }
-
-  // Backend 4xx: same status and the backend's { Error: { title, message } } body.
-  private async clientError(response: Response): Promise<HttpException> {
-    const text = await response.text();
-    try {
-      const json: unknown = JSON.parse(text);
-      if (json !== null && typeof json === 'object' && 'Error' in json) {
-        return new HttpException(json, response.status);
-      }
-    } catch {
-      // not JSON: fall through to the generic body
-    }
-    return new HttpException(
-      {
-        Error: {
-          title: 'Request failed',
-          message: `The service responded with status ${response.status}`,
-        },
-      },
-      response.status,
-    );
-  }
-
-  // 5xx or network failure -> 502; timeout -> 504. The cause is logged, never returned.
-  private gatewayError(
-    service: Service,
-    method: HttpMethod,
-    path: string,
-    failure: Response | Error,
-  ): HttpException {
-    const rejected =
-      failure instanceof Response && [401, 403].includes(failure.status);
-    const reason =
-      failure instanceof Response
-        ? `status ${failure.status}${rejected ? ' (internal call rejected; check the BFF internal api key)' : ''}`
-        : `${failure.name}: ${failure.message}`;
-    this.logger.error(`${method} ${service} ${path} failed: ${reason}`);
-
-    if (failure instanceof Error && failure.name === 'TimeoutError') {
-      return new GatewayTimeoutException({
-        Error: {
-          title: 'Gateway Timeout',
-          message: `The ${service} service did not respond in time`,
-        },
-      });
-    }
-    return new BadGatewayException({
-      Error: {
-        title: 'Bad Gateway',
-        message: `The ${service} service is unavailable`,
-      },
-    });
   }
 
   // Plain concatenation: `new URL(path, base)` would drop a base path such as an API Gateway stage.
