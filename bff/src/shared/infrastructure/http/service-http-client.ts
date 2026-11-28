@@ -3,11 +3,14 @@ import {
   BadGatewayException,
   GatewayTimeoutException,
   HttpException,
+  Inject,
   Injectable,
   Logger,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { Environment } from '../config/environment';
+import type { ConfigType } from '@nestjs/config';
+import { apiKeyConfig } from '../config/api-key.config';
+import { httpConfig } from '../config/http.config';
+import { servicesConfig } from '../config/services.config';
 
 export type Service = 'auth' | 'shop' | 'order' | 'payment';
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -19,22 +22,18 @@ export type RequestOptions = {
   accessToken?: string;
 };
 
-const SERVICE_URL = {
-  auth: 'AUTH_SERVICE_URL',
-  shop: 'SHOP_SERVICE_URL',
-  order: 'ORDER_SERVICE_URL',
-  payment: 'PAYMENT_SERVICE_URL',
-} as const satisfies Record<Service, keyof Environment>;
-
-const TIMEOUT_MS = 5000;
-// Waits before each retry; only GET is retried so writes are never duplicated.
-const GET_RETRY_DELAYS_MS = [200, 400];
-
 @Injectable()
 export class ServiceHttpClient {
   private readonly logger = new Logger(ServiceHttpClient.name);
 
-  constructor(private readonly config: ConfigService<Environment, true>) {}
+  constructor(
+    @Inject(servicesConfig.KEY)
+    private readonly services: ConfigType<typeof servicesConfig>,
+    @Inject(httpConfig.KEY)
+    private readonly http: ConfigType<typeof httpConfig>,
+    @Inject(apiKeyConfig.KEY)
+    private readonly apiKey: ConfigType<typeof apiKeyConfig>,
+  ) {}
 
   // `path` carries the full route (e.g. '/shop/products'); backends keep their prefix.
   async request<T = unknown>(
@@ -45,9 +44,7 @@ export class ServiceHttpClient {
   ): Promise<T> {
     const url = this.buildUrl(service, path, options.query);
     const headers: Record<string, string> = {
-      'X-Internal-Api-Key': this.config.get('INTERNAL_API_KEY', {
-        infer: true,
-      }),
+      'X-Internal-Api-Key': this.apiKey.internalApiKey,
     };
     if (options.body !== undefined)
       headers['Content-Type'] = 'application/json';
@@ -60,7 +57,8 @@ export class ServiceHttpClient {
       body:
         options.body === undefined ? undefined : JSON.stringify(options.body),
     };
-    const retryDelays = method === 'GET' ? GET_RETRY_DELAYS_MS : [];
+    // Only GET is retried so writes are never duplicated.
+    const retryDelays = method === 'GET' ? this.http.retryDelaysMs : [];
 
     for (let attempt = 0; ; attempt++) {
       const result = await this.send(url, init);
@@ -92,7 +90,7 @@ export class ServiceHttpClient {
     try {
       return await fetch(url, {
         ...init,
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        signal: AbortSignal.timeout(this.http.timeoutMs),
       });
     } catch (error) {
       return error instanceof Error ? error : new Error(String(error));
@@ -158,7 +156,7 @@ export class ServiceHttpClient {
     path: string,
     query: RequestOptions['query'],
   ): string {
-    const base = this.config.get(SERVICE_URL[service], { infer: true });
+    const base = this.services[service].url;
     const url = new URL(`${base.replace(/\/$/, '')}${path}`);
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
